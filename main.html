@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SkillSwap | Precision Safe Route</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
+
+    <style>
+        * { box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }
+        body { margin: 0; background: #0b0d0b; color: #eee; overflow: hidden; }
+        .app-container { display: flex; flex-direction: column; height: 100vh; }
+        .header { padding: 15px; background: #151815; border-bottom: 2px solid #7CFF7C; z-index: 1000; }
+        .search-box { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+        input { flex: 1; min-width: 200px; padding: 12px; background: #000; border: 1px solid #333; color: #7CFF7C; font-weight: bold; border-radius: 4px; }
+        .btn { background: #7CFF7C; color: #000; border: none; padding: 12px; font-weight: bold; cursor: pointer; border-radius: 4px; }
+        .btn.geo { background: #333; color: #7CFF7C; border: 1px solid #7CFF7C; }
+        #map { flex-grow: 1; width: 100%; height: 100%; }
+        .status { font-size: 12px; color: #888; margin-top: 5px; }
+        .leaflet-routing-container { background: rgba(21, 24, 21, 0.9) !important; color: #eee !important; border: 1px solid #7CFF7C !important; max-height: 150px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+
+<div class="app-container">
+    <div class="header">
+        <h2 style="color:#7CFF7C; margin:0;">SkillSwap Navigator Pro</h2>
+        <div class="search-box">
+            <button class="btn geo" onclick="getLocation()">📍 My Location</button>
+            <input type="text" id="destInput" placeholder="Enter Destination (e.g. Rohini)">
+            <button class="btn" onclick="calculateSafeRoute()">Find Safe Path</button>
+        </div>
+        <div id="statusText" class="status">Start: Default (Delhi Center)</div>
+    </div>
+    <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+
+<script>
+    // 1. Initial Setup
+    let userLocation = [28.6139, 77.2090]; 
+    const map = L.map('map').setView(userLocation, 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+    // Precise Red Zones
+    const crimeZones = [
+        {lat: 28.7041, lng: 77.1025, label: "Pitampura High Risk"},
+        {lat: 28.6320, lng: 77.2180, label: "CP Blocked Zone"},
+        {lat: 28.7400, lng: 77.0600, label: "Rohini Unsafe Spot"}
+    ];
+
+    crimeZones.forEach(zone => {
+        L.circle([zone.lat, zone.lng], { 
+            color: 'red', fillColor: '#f03', fillOpacity: 0.5, radius: 500 
+        }).addTo(map).bindPopup(zone.label);
+    });
+
+    let routingControl = null;
+
+    // 2. GPS Location
+    function getLocation() {
+        if (navigator.geolocation) {
+            document.getElementById('statusText').innerText = "Detecting GPS...";
+            navigator.geolocation.getCurrentPosition((pos) => {
+                userLocation = [pos.coords.latitude, pos.coords.longitude];
+                map.flyTo(userLocation, 14);
+                L.marker(userLocation).addTo(map).bindPopup("You are here").openPopup();
+                document.getElementById('statusText').innerText = "Location Found! Using Live GPS.";
+            });
+        }
+    }
+
+    // 3. Robust Routing with Strong Bypass
+    async function calculateSafeRoute() {
+        const query = document.getElementById('destInput').value;
+        if (!query) return alert("Please enter destination!");
+
+        try {
+            const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ", Delhi")}&limit=1`);
+            const data = await response.json();
+            if (data.length === 0) return alert("Location not found.");
+
+            const startPos = L.latLng(userLocation[0], userLocation[1]);
+            const destPos = L.latLng(data[0].lat, data[0].lon);
+            
+            // Check if destination itself is in a Red Zone
+            crimeZones.forEach(zone => {
+                if (destPos.distanceTo(L.latLng(zone.lat, zone.lng)) < 600) {
+                    alert("⚠️ WARNING: Your destination is inside or very close to a RED ZONE!");
+                }
+            });
+
+            // --- ADVANCED REROUTING LOGIC ---
+            let waypoints = [startPos, destPos];
+
+            crimeZones.forEach(zone => {
+                const zoneLoc = L.latLng(zone.lat, zone.lng);
+                
+                // Agar zone start aur end ke raste mein kahi bhi hai (Check within 6km)
+                if (startPos.distanceTo(zoneLoc) < 6000) {
+                    // Hum raste ko 1.5km door 'dhakka' denge
+                    const offset = 0.018; 
+                    const bypassNorth = L.latLng(zone.lat + offset, zone.lng + offset);
+                    const bypassSouth = L.latLng(zone.lat - offset, zone.lng - offset);
+
+                    // Destination ki disha mein jo bypass point behtar hai, use chuno
+                    if (bypassNorth.distanceTo(destPos) < bypassSouth.distanceTo(destPos)) {
+                        waypoints.splice(1, 0, bypassNorth);
+                    } else {
+                        waypoints.splice(1, 0, bypassSouth);
+                    }
+                }
+            });
+
+            if (routingControl) map.removeControl(routingControl);
+
+            routingControl = L.Routing.control({
+                waypoints: waypoints,
+                router: L.Routing.osrmv1({ serviceUrl: 'https://router.project-osrm.org/route/v1' }),
+                lineOptions: { styles: [{ color: '#7CFF7C', weight: 8, opacity: 0.8 }] },
+                createMarker: (i, wp, n) => {
+                    if(i===0) return L.marker(wp.latLng).bindPopup("Start");
+                    if(i===n-1) return L.marker(wp.latLng).bindPopup("Destination");
+                    return null; // Hide bypass markers
+                }
+            }).addTo(map);
+
+            map.flyTo(destPos, 13);
+
+        } catch (err) {
+            alert("Error connecting to map services.");
+        }
+    }
+
+    setTimeout(() => map.invalidateSize(), 500);
+</script>
+
+</body>
+</html>
